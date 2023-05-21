@@ -78,8 +78,8 @@ class ModuleInstance extends InstanceBase {
 				debug: false, // Default: false
 				ip: this.config.host,
 				mac: this.config.macAddress,
-				nameApp: 'Bitfocus Companion', // Default: NodeJS
-				port: this.config.port || 8002, // Default: 8002
+				nameApp: 'Bitfocus Companion',
+				port: this.config.port || 8002,
 				token: this.config.token,
 			}
 			
