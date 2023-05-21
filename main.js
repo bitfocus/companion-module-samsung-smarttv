@@ -166,10 +166,9 @@ class ModuleInstance extends InstanceBase {
 				id: 'host',
 				label: 'Target IP',
 				width: 6,
-				//choices: this.CHOICES_DEVICES,
 				default: '',
-					allowCustom: true,
-					regex: Regex.IP
+				allowCustom: true,
+				regex: Regex.IP
 			},
 			{
 				type: 'textinput',
