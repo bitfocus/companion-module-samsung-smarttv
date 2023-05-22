@@ -1,3 +1,3 @@
-# companion-module-samsung-smart-tv-control
+# companion-module-samsung-smarttv
 
 See [HELP.md](./companion/HELP.md) and [LICENSE](./LICENSE)
