@@ -1,5 +1,5 @@
 {
-	"name": "samsung-smart-tv-control",
+	"name": "samsung-smarttv",
 	"version": "0.1.0",
 	"main": "main.js",
 	"scripts": {
@@ -8,7 +8,7 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/bitfocus/companion-module-your-module-name.git"
+		"url": "git+https://github.com/bitfocus/companion-module-samsung-smarttv.git"
 	},
 	"dependencies": {
 		"@companion-module/base": "~1.4.0"
