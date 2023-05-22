@@ -1,12 +1,12 @@
 {
-	"id": "samsung-smart-tv-control",
-	"name": "samsung-smart-tv-control",
-	"shortname": "samsung-smart-tv-control",
+	"id": "samsung-smarttv",
+	"name": "samsung-smarttv",
+	"shortname": "samsung-smarttv",
 	"description": "Control your Samsung Smart TV from Companion",
 	"version": "0.0.0",
 	"license": "MIT",
-	"repository": "git+https://github.com/bitfocus/companion-module-your-module-name.git",
-	"bugs": "https://github.com/bitfocus/companion-module-your-module-name/issues",
+	"repository": "git+https://github.com/bitfocus/companion-module-samsung-smarttv.git",
+	"bugs": "https://github.com/bitfocus/companion-module-samsung-smarttv/issues",
 	"maintainers": [
 		{
 			"name": "Your name",
