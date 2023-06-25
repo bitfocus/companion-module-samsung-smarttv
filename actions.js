@@ -1,4 +1,5 @@
-const { KEYS } = require('samsung-tv-control')
+const { InstanceStatus } = require('@companion-module/base');
+const { KEYS } = require('samsung-tv-control');
 const wol = require("wake_on_lan");
 
 module.exports = function (self) {
@@ -12,7 +13,10 @@ module.exports = function (self) {
 					type: 'dropdown',
 					label: 'On/Off',
 					default: 'powerOn',
-					choices: [{ label: 'Power On', id: 'powerOn' }, { label: 'Power Off', id: 'powerOff' }]
+					choices: [
+						{ label: 'Power On', id: 'powerOn' },
+						{ label: 'Power Off', id: 'powerOff' }
+					]
 				},
 			],
 			callback: async (event) => {
@@ -56,7 +60,7 @@ module.exports = function (self) {
 								if (err) {
 									console.error(err)
 								}else{
-									self.updateStatus('Disconnected')
+									self.updateStatus('TV Powered Off')
 								}
 							})
 						}).catch((e) => console.error(e))
@@ -330,9 +334,10 @@ module.exports = function (self) {
 						self.tv.sendKey(KEYS[event.options.remoteButton], function (err, res) {
 							if (err) {
 								console.error(err)
-							}
-							if(event.options.remoteButton == "KEY_POWEROFF" || event.options.remoteButton == "KEY_POWER"){
-								self.updateStatus('Disconnected')
+							}else if (event.options.remoteButton == "KEY_POWEROFF" || event.options.remoteButton == "KEY_POWER"){
+								self.updateStatus('TV Powered Off')
+							}else{
+								self.updateStatus(InstanceStatus.Ok)
 							}
 						})
 					}).catch((e) => console.error(e))
