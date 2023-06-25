@@ -71,7 +71,7 @@ class ModuleInstance extends InstanceBase {
 		if(this.config.host && this.config.macAddress && this.config.macAddress !== ""){
 			
 			if(!this.config.token){
-				console.debug('no token found, establishing first time connection?')
+				console.debug('No token found in config, establishing first time connection?')
 			}
 			
 			const config = {
@@ -83,22 +83,30 @@ class ModuleInstance extends InstanceBase {
 				token: this.config.token,
 			}
 			
-			console.debug('attempting connection to tv')
+			console.debug('Attempting connection to tv')
 			try{
 				this.tv = new Samsung(config)
 				this.tv.isAvailable().then(() => {
-					console.debug('connection established')
+					console.debug('Connection established')
 					console.debug(this.tv)
 					this.updateStatus(InstanceStatus.Ok)
 					
 					// Get token for websocket access
 					this.tv.getToken((token) => {
 						if(token){
-							console.debug('Token: ' + token)
+							console.debug('Received Token from TV: ' + token)
 							this.config.token = token
+							console.debug('Saving token to configuration')
 							this.saveConfig(this.config)
 						}
 					})
+					
+					// get a list of installed apps from the TV
+					/*this.tv.getAppsFromTV((err, res) => {
+						if (!err) {
+							console.log('# Response getAppsFromTV', res.data.data)
+						}
+					})*/
 					
 				}).catch((e) => {
 					console.error(e)
