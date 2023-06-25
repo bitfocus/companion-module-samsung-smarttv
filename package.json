@@ -11,7 +11,9 @@
 		"url": "git+https://github.com/bitfocus/companion-module-samsung-smarttv.git"
 	},
 	"dependencies": {
-		"@companion-module/base": "~1.4.0"
+		"@companion-module/base": "~1.4.0",
+		"macfromip": "^1.1.1",
+		"wake_on_lan": "^1.0.0"
 	},
 	"devDependencies": {
 		"@companion-module/tools": "^1.2.0"
