@@ -12,6 +12,7 @@ While this module should work with any Samsung Smart TV it has been specifically
 - UE43NU7400
 - UN55NU7100
 - UN50MU6070
+- LH70BETHLGFXGO
 
 ### Available Actions
 
