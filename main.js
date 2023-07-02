@@ -33,9 +33,7 @@ class ModuleInstance extends InstanceBase {
 			this.config.port = 8002;
 		}
 		
-		// attempt to connec to the TV
 		this.establishConnection()
-		//this.findTVsOnLan()
 
 		this.updateActions()
 		this.updateVariableDefinitions()
@@ -91,7 +89,8 @@ class ModuleInstance extends InstanceBase {
 					console.debug(this.tv)
 					this.updateStatus(InstanceStatus.Ok)
 					
-					// Get token for websocket access
+					// Get token for persistant access
+					// Without token tv will prompt to allow control on every connection
 					this.tv.getToken((token) => {
 						if(token){
 							console.debug('Received Token from TV: ' + token)
