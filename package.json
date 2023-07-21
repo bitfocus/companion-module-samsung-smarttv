@@ -12,6 +12,7 @@
 	},
 	"dependencies": {
 		"@companion-module/base": "~1.4.0",
+		"samsung-tv-control": "^1.14.0",
 		"macfromip": "^1.1.1",
 		"wake_on_lan": "^1.0.0"
 	},
