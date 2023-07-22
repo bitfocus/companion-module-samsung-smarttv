@@ -9,6 +9,7 @@ When connecting for the first time, please make sure your TV is turned on, conne
 ### Supported Models
 
 While this module should work with any Samsung Smart TV it has been specifically tested with the following TVs models:
+
 - UE43NU7400
 - UN55NU7100
 - UN50MU6070
