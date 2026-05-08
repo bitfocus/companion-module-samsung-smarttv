@@ -17,7 +17,7 @@
 		"type": "node18",
 		"api": "nodejs-ipc",
 		"apiVersion": "1.0.0",
-		"entrypoint": "../main.js"
+		"entrypoint": "../dist/index.js"
 	},
 	"legacyIds": [],
 	"manufacturer": "Samsung",
