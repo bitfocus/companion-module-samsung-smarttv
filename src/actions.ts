@@ -22,12 +22,27 @@ export function updateActions(self: ModuleInstance): void {
 				},
 			],
 			callback: async (event) => {
+				const powerState = await self.fetchDevicePowerState()
+
 				if (event.options.power === 'powerOn') {
+					if (powerState === 'on') {
+						self.log('debug', 'Power on skipped: device API reports PowerState is already on')
+						return
+					}
+					if (powerState === 'standby') {
+						self.log('debug', 'Power on: device is in standby — sending KEY_POWER')
+						await self.sendKey('KEY_POWER')
+						return
+					}
+					// API unreachable, fall back to Wake-on-LAN.
 					if (!self.tv) {
 						self.log('error', 'No TV connection configured')
 						return
 					}
-					self.log('debug', 'Sending Wake-on-LAN to: ' + self.config.macAddress)
+					self.log(
+						'debug',
+						'Could not read PowerState from device API; sending Wake-on-LAN to: ' + self.config.macAddress,
+					)
 					try {
 						await self.tv.wakeTV()
 					} catch (err: unknown) {
@@ -35,14 +50,19 @@ export function updateActions(self: ModuleInstance): void {
 						self.log('error', 'Wake-on-LAN failed: ' + message)
 						return
 					}
-					// Give the TV a moment to boot before re-establishing
-					// the WebSocket so token auth doesn't race the wake-up.
 					self.log('debug', 'Waiting for TV to boot...')
 					await new Promise((resolve) => setTimeout(resolve, WAKE_RECONNECT_DELAY_MS))
 					self.log('debug', 'Re-establishing WebSocket connection...')
 					self.establishConnection()
 				} else {
-					self.log('debug', 'Power off')
+					if (powerState !== 'on') {
+						self.log(
+							'debug',
+							'Power off skipped: device API does not report PowerState on (already standby/off or unreachable)',
+						)
+						return
+					}
+					self.log('debug', 'Power off: sending KEY_POWER')
 					await self.sendKey('KEY_POWER')
 				}
 			},

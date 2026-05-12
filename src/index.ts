@@ -1,8 +1,21 @@
 import { InstanceBase, InstanceStatus, runEntrypoint, SomeCompanionConfigField } from '@companion-module/base'
-import { SamsungTvRemote, Keys } from 'samsung-tv-remote'
+import { SamsungTvRemote, Keys, getAwakeSamsungDevices, type SamsungDevice } from 'samsung-tv-remote'
 import { updateActions } from './actions.js'
 import { updateVariableDefinitions } from './variables.js'
 import { defineConfigFields, SamsungConfig } from './config.js'
+
+/** Port for Samsung REST device info (`/api/v2`), not the WebSocket remote port. */
+const DEVICE_REST_PORT = 8001
+const DEVICE_API_PATH = '/api/v2/'
+const POWER_STATE_FETCH_TIMEOUT_MS = 5000
+
+/** Normalized from `device.PowerState` on `http://<ip>:8001/api/v2`. */
+export type DevicePowerState = 'on' | 'standby'
+
+function formatDiscoveredSamsungDevice(device: SamsungDevice): string {
+	const friendlyName = device.friendlyName?.trim() || 'Unknown'
+	return `${friendlyName} (IP: ${device.ip}, MAC: ${device.mac})`
+}
 
 export class ModuleInstance extends InstanceBase<SamsungConfig> {
 	tv: SamsungTvRemote | undefined
@@ -14,6 +27,14 @@ export class ModuleInstance extends InstanceBase<SamsungConfig> {
 
 	async init(config: SamsungConfig, _isFirstInit: boolean): Promise<void> {
 		this.config = config
+
+		const devices = await getAwakeSamsungDevices()
+		if (devices.length) {
+			const list = devices.map(formatDiscoveredSamsungDevice).join('\n')
+			this.log('debug', 'Found Samsung TV devices on network:\n' + list)
+		} else {
+			this.log('debug', 'No Samsung TV devices found on network')
+		}
 
 		if (!this.config.host) {
 			this.updateStatus(InstanceStatus.BadConfig, 'IP address not set')
@@ -51,6 +72,39 @@ export class ModuleInstance extends InstanceBase<SamsungConfig> {
 		})
 
 		this.updateStatus(InstanceStatus.Ok)
+	}
+
+	/**
+	 * Reads `device.PowerState` from the TV REST API. Returns `null` if the request fails
+	 * (e.g. TV fully powered down and not reachable on the network).
+	 */
+	async fetchDevicePowerState(): Promise<DevicePowerState | null> {
+		if (!this.config.host) {
+			return null
+		}
+		const url = `http://${this.config.host}:${DEVICE_REST_PORT}${DEVICE_API_PATH}`
+		const controller = new AbortController()
+		const timeout = setTimeout(() => controller.abort(), POWER_STATE_FETCH_TIMEOUT_MS)
+		try {
+			const res = await fetch(url, { signal: controller.signal })
+			if (!res.ok) {
+				this.log('debug', `Device API ${url} returned HTTP ${res.status}`)
+				return null
+			}
+			const data = (await res.json()) as { device?: { PowerState?: string } }
+			const raw = data.device?.PowerState
+			if (typeof raw !== 'string') {
+				this.log('debug', 'Device API response had no PowerState')
+				return null
+			}
+			return raw.trim().toLowerCase() === 'on' ? 'on' : 'standby'
+		} catch (err: unknown) {
+			const message = err instanceof Error ? err.message : String(err)
+			this.log('debug', `Could not read device power state from ${url}: ${message}`)
+			return null
+		} finally {
+			clearTimeout(timeout)
+		}
 	}
 
 	async sendKey(key: keyof typeof Keys): Promise<void> {
