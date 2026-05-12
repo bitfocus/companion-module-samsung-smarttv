@@ -1,9 +1,17 @@
 {
 	"name": "samsung-smarttv",
-	"version": "0.1.1",
-	"main": "main.js",
+	"version": "1.0.0-rc.1",
+	"main": "dist/index.js",
+	"type": "module",
 	"scripts": {
-		"format": "prettier -w ."
+		"postinstall": "husky",
+		"format": "prettier -w .",
+		"package": "run build && companion-module-build",
+		"build": "rimraf dist && run build:main",
+		"build:main": "tsc -p tsconfig.build.json",
+		"dev": "tsc -p tsconfig.build.json --watch",
+		"lint:raw": "eslint",
+		"lint": "run lint:raw ."
 	},
 	"license": "MIT",
 	"repository": {
@@ -11,13 +19,32 @@
 		"url": "git+https://github.com/bitfocus/companion-module-samsung-smarttv.git"
 	},
 	"dependencies": {
-		"@companion-module/base": "~1.4.0",
-		"samsung-tv-control": "^1.14.0",
-		"macfromip": "^1.1.1",
-		"wake_on_lan": "^1.0.0"
+		"@companion-module/base": "~1.12.0",
+		"samsung-tv-remote": "^3.0.5"
 	},
 	"devDependencies": {
-		"@companion-module/tools": "^1.2.0"
+		"@companion-module/tools": "^2.7.1",
+		"@types/node": "^22.19.17",
+		"eslint": "^9.39.2",
+		"husky": "^9.1.7",
+		"lint-staged": "^16.2.7",
+		"prettier": "^3.8.1",
+		"rimraf": "^6.1.2",
+		"typescript": "~5.9.3",
+		"typescript-eslint": "^8.54.0"
 	},
+	"lint-staged": {
+		"*.{css,json,md,scss}": [
+			"prettier --write"
+		],
+		"*.{ts,tsx,js,jsx}": [
+			"yarn lint:raw --fix"
+		]
+	},
+	"engines": {
+		"node": "^22.20",
+		"yarn": "^4"
+	},
+	"packageManager": "yarn@4.14.1",
 	"prettier": "@companion-module/tools/.prettierrc.json"
 }
