@@ -14,10 +14,13 @@
 		}
 	],
 	"runtime": {
-		"type": "node18",
+		"type": "node26",
 		"api": "nodejs-ipc",
 		"apiVersion": "1.0.0",
-		"entrypoint": "../main.js"
+		"entrypoint": "../main.js",
+		"permissions": {
+			"child-process": true
+		}
 	},
 	"legacyIds": [],
 	"manufacturer": "Samsung",
