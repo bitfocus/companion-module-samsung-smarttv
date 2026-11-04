@@ -3,7 +3,8 @@
 	"version": "0.1.1",
 	"main": "main.js",
 	"scripts": {
-		"format": "prettier -w ."
+		"format": "prettier -w .",
+		"build": "companion-module-build"
 	},
 	"license": "MIT",
 	"repository": {
@@ -11,13 +12,17 @@
 		"url": "git+https://github.com/bitfocus/companion-module-samsung-smarttv.git"
 	},
 	"dependencies": {
-		"@companion-module/base": "~1.4.0",
+		"@companion-module/base": "~1.15.1",
 		"samsung-tv-control": "^1.14.0",
 		"macfromip": "^1.1.1",
 		"wake_on_lan": "^1.0.0"
 	},
 	"devDependencies": {
-		"@companion-module/tools": "^1.2.0"
+		"@companion-module/tools": "~2.9.1",
+		"prettier": "^3.8.3"
 	},
-	"prettier": "@companion-module/tools/.prettierrc.json"
+	"prettier": "@companion-module/tools/.prettierrc.json",
+	"engines": {
+		"node": "^26.0.0"
+	}
 }
