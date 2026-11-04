@@ -15,3 +15,18 @@ jobs:
     uses: bitfocus/actions/.github/workflows/module-checks.yaml@main
     # with:
     #   upload-artifact: true # uncomment this to upload the built package as an artifact to this workflow that you can download and share with others
+
+  test:
+    name: Test module
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '26'
+      - run: npm install --global yarn@1.22.22
+      - run: yarn install --frozen-lockfile
+      - run: yarn test
+      - run: yarn format:check
+      - run: yarn check

@@ -62,7 +62,7 @@ class ModuleInstance extends InstanceBase {
 						console.error('issue getting mac from ip ' + err + ' | ' + data)
 						localRef.updateStatus(
 							InstanceStatus.ConnectionFailure,
-							'Unable to determine mac by ip. Ensure device is powered on.'
+							'Unable to determine mac by ip. Ensure device is powered on.',
 						)
 					}
 				})

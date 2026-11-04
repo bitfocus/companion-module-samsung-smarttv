@@ -25,7 +25,7 @@ module.exports = function (self) {
 					console.log('attempting to wake from mac: ' + self.config.macAddress)
 					if (!macAddress || macAddress === '') {
 						console.error(
-							'Unable to turn on the TV without a macAddress. Turn on the TV first then connect to automatically get the macAddress.'
+							'Unable to turn on the TV without a macAddress. Turn on the TV first then connect to automatically get the macAddress.',
 						)
 						return
 					}
