@@ -1,27 +1,52 @@
 import { InstanceBase, InstanceStatus, type InstanceTypes, type SomeCompanionConfigField } from '@companion-module/base'
-import { SamsungTvRemote, Keys, getAwakeSamsungDevices, type SamsungDevice } from 'samsung-tv-remote'
+import { Keys, getAwakeSamsungDevices, type SamsungDevice } from 'samsung-tv-remote'
 import { updateActions, type SamsungActions } from './actions.js'
-import { updateVariableDefinitions } from './variables.js'
-import { defineConfigFields, type SamsungConfig } from './config.js'
+import { defineConfigFields, type SamsungConfig, type SamsungSecrets } from './config.js'
+import { fetchDeviceInfo, type SamsungDeviceSpec } from './deviceInfo.js'
+import { updateFeedbacks, type SamsungFeedbacks } from './feedbacks.js'
+import { updatePresets } from './presets.js'
+import { SamsungRemote, type SamsungKey } from './remote.js'
+import { updateVariableDefinitions, type SamsungVariables } from './variables.js'
+import { sendWakeOnLan } from './wake.js'
 
 export interface SamsungTypes extends InstanceTypes {
 	config: SamsungConfig
-	secrets: undefined
+	secrets: SamsungSecrets
 	actions: SamsungActions
-	variables: Record<string, never>
+	feedbacks: SamsungFeedbacks
+	variables: SamsungVariables
 }
 
 export const UpgradeScripts = []
 
-/** Port for Samsung REST device info (`/api/v2`), not the WebSocket remote port. */
-const DEVICE_REST_PORT = 8001
-const DEVICE_API_PATH = '/api/v2/'
-const POWER_STATE_FETCH_TIMEOUT_MS = 2000
-const REMOTE_READY_RETRY_DELAY_MS = 50
-const REMOTE_READY_MAX_ATTEMPTS = 10
+const DEVICE_INFO_TIMEOUT_MS = 2000
+const DEFAULT_REMOTE_PORT = 8002
+/** Name shown in the TV's "Allow" prompt. Pairing tokens are tied to it. */
+const REMOTE_APP_NAME = 'Bitfocus Connection'
+const CONNECT_TIMEOUT_MS = 5000
+/** Long enough for someone to walk to the TV and answer the pairing prompt. */
+const PAIRING_TIMEOUT_MS = 30000
+const WAKE_TIMEOUT_MS = 30000
+const WAKE_POLL_INTERVAL_MS = 1000
+const POWER_POLL_INTERVAL_MS = 5000
+/** TVs keep reporting PowerState "on" for a few seconds after KEY_POWER, so trust the power-off for this long. */
+const POWER_OFF_GRACE_MS = POWER_POLL_INTERVAL_MS + 5000
+/**
+ * TVs that don't report PowerState stay reachable for a while as they shut down, and reachable is all there is to
+ * judge them by, so they need longer (homebridge-samsung-tizen uses 20s for these too).
+ */
+const POWER_OFF_GRACE_NO_POWERSTATE_MS = 20000
+/** samsung-tv-remote, which this module used before, waited 60ms between keys. */
+const KEY_DELAY_MS = 60
+/** Frame TVs only switch to Art Mode on a click of KEY_POWER; holding it turns them off. */
+const FRAME_POWER_HOLD_MS = 3000
+const NO_MAC = '00:00:00:00:00:00'
 
-/** Normalized from `device.PowerState` on `http://<ip>:8001/api/v2`. */
-export type DevicePowerState = 'on' | 'standby'
+/**
+ * `on`/`standby` come from the TV's device info (`/api/v2/`); `off` means the TV couldn't be reached;
+ * `unknown` means it hasn't been checked yet.
+ */
+export type PowerState = 'on' | 'standby' | 'off' | 'unknown'
 
 function formatDiscoveredSamsungDevice(device: SamsungDevice): string {
 	const friendlyName = device.friendlyName?.trim() || 'Unknown'
@@ -29,16 +54,41 @@ function formatDiscoveredSamsungDevice(device: SamsungDevice): string {
 }
 
 export default class ModuleInstance extends InstanceBase<SamsungTypes> {
-	tv: SamsungTvRemote | undefined
+	tv: SamsungRemote | undefined
 	config!: SamsungConfig
+	secrets: SamsungSecrets = {}
+	powerState: PowerState = 'unknown'
+	/** Last device info the TV reported, kept for capabilities such as Frame TV support. */
+	deviceSpec: SamsungDeviceSpec | undefined
+	#powerOffUntil = 0
+	#powerPollTimer: NodeJS.Timeout | undefined
+	#powerPollGeneration = 0
 
 	constructor(internal: unknown) {
 		super(internal)
 	}
 
-	async init(config: SamsungConfig, _isFirstInit: boolean): Promise<void> {
+	async init(config: SamsungConfig, _isFirstInit: boolean, secrets: SamsungSecrets): Promise<void> {
 		this.config = config
+		this.secrets = secrets ?? {}
 
+		// Registered even when the config is incomplete: configUpdated doesn't re-register them
+		this.updateActions()
+		this.updateFeedbacks()
+		this.updateVariableDefinitions()
+		this.updatePresets()
+		this.setPowerState('unknown')
+
+		await this.fillMacAddressFromDiscovery()
+		this.establishConnection()
+		this.startPowerPolling()
+	}
+
+	/**
+	 * Logs Samsung TVs found on the network and, when the MAC address is blank, fills it in from the
+	 * discovered TV matching the configured IP.
+	 */
+	async fillMacAddressFromDiscovery(): Promise<void> {
 		const devices = await getAwakeSamsungDevices()
 		if (devices.length) {
 			const list = devices.map(formatDiscoveredSamsungDevice).join('\n')
@@ -47,128 +97,200 @@ export default class ModuleInstance extends InstanceBase<SamsungTypes> {
 			this.log('debug', 'No Samsung TV devices found on network')
 		}
 
-		if (!this.config.host) {
-			this.updateStatus(InstanceStatus.BadConfig, 'IP address not set')
-			return
-		}
-		if (!this.config.macAddress) {
-			this.updateStatus(InstanceStatus.BadConfig, 'MAC address not set')
-			return
-		}
+		if (!this.config.host || this.config.macAddress) return
+		const match = devices.find((device) => device.ip === this.config.host && device.mac && device.mac !== NO_MAC)
+		if (!match) return
+		this.log('info', `Filled in MAC address ${match.mac} from the TV found at ${match.ip}`)
+		this.config = { ...this.config, macAddress: match.mac }
+		this.saveConfig(this.config, undefined)
+	}
 
-		this.updateActions()
-		this.updateVariableDefinitions()
-		this.establishConnection()
+	get remotePort(): number {
+		return this.config.port ?? DEFAULT_REMOTE_PORT
+	}
+
+	saveToken(token: string): void {
+		this.secrets = { ...this.secrets, token }
+		this.saveConfig(undefined, this.secrets)
 	}
 
 	establishConnection(): void {
-		this.updateStatus(InstanceStatus.Connecting)
-
 		if (this.tv) {
 			this.tv.disconnect()
 			this.tv = undefined
 		}
 
-		if (!this.config.host || !this.config.macAddress) {
-			this.updateStatus(InstanceStatus.BadConfig, 'IP and MAC address are required')
+		if (!this.config.host) {
+			this.updateStatus(InstanceStatus.BadConfig, 'IP address not set')
 			return
 		}
 
+		const paired = !!this.secrets.token
+		const limitTlsTo12 = this.config.limitTls ?? true
 		this.log(
 			'debug',
-			`Creating remote for TV — IP: ${this.config.host}, port: ${this.config.port ?? 8002}, MAC: ${this.config.macAddress}`,
+			`Creating remote for TV — IP: ${this.config.host}, port: ${this.remotePort}, MAC: ${this.config.macAddress || 'not set'}, ` +
+				`paired: ${paired}, TLS limited to 1.2: ${limitTlsTo12}`,
 		)
-		this.tv = new SamsungTvRemote({
-			ip: this.config.host,
-			mac: this.config.macAddress,
-			name: 'Bitfocus Connection',
-			port: this.config.port ?? 8002,
+		const tv = new SamsungRemote({
+			host: this.config.host,
+			port: this.remotePort,
+			name: REMOTE_APP_NAME,
+			token: this.secrets.token,
+			limitTlsTo12,
+			connectTimeoutMs: paired ? CONNECT_TIMEOUT_MS : PAIRING_TIMEOUT_MS,
+			keyDelayMs: KEY_DELAY_MS,
+			onToken: (token) => {
+				this.log('info', 'Paired with the TV; pairing token saved to this connection')
+				this.saveToken(token)
+			},
 		})
+		this.tv = tv
 
-		this.updateStatus(InstanceStatus.Ok)
+		// Connect up front so a first-time pairing prompt appears now rather than on the first button press
+		this.connectRemote(tv)
 	}
 
-	/**
-	 * Reads `device.PowerState` from the TV REST API. Returns `null` if the request fails
-	 * (e.g. TV fully powered down and not reachable on the network).
-	 */
-	async fetchDevicePowerState(): Promise<DevicePowerState | null> {
-		if (!this.config.host) {
+	/** Connects in the background, reflecting the outcome in the connection status. */
+	connectRemote(tv: SamsungRemote): void {
+		this.updateStatus(InstanceStatus.Connecting, this.secrets.token ? null : `Allow "${REMOTE_APP_NAME}" on the TV`)
+		tv.connect().then(
+			() => {
+				if (this.tv === tv) this.updateStatus(InstanceStatus.Ok)
+			},
+			(err: unknown) => {
+				if (this.tv !== tv) return
+				const message = err instanceof Error ? err.message : String(err)
+				this.log('debug', `Could not connect to TV: ${message}`)
+				this.updateStatus(InstanceStatus.Disconnected, message)
+			},
+		)
+	}
+
+	/** Reads the TV's device info. Returns null when the TV can't be reached (fully off, or wrong IP). */
+	async readDeviceSpec(verbose: boolean): Promise<SamsungDeviceSpec | null> {
+		if (!this.config.host) return null
+		const { result, errors } = await fetchDeviceInfo(
+			this.config.host,
+			this.remotePort,
+			this.config.limitTls ?? true,
+			DEVICE_INFO_TIMEOUT_MS,
+		)
+		if (!result) {
+			if (verbose) this.log('debug', `Could not read device info from ${this.config.host}: ${errors.join('; ')}`)
 			return null
 		}
-		const url = `http://${this.config.host}:${DEVICE_REST_PORT}${DEVICE_API_PATH}`
-		const controller = new AbortController()
-		const timeout = setTimeout(() => controller.abort(), POWER_STATE_FETCH_TIMEOUT_MS)
-		this.log('debug', `Querying device power API: ${url} (timeout ${POWER_STATE_FETCH_TIMEOUT_MS}ms)`)
+		if (verbose) this.log('debug', `Device info from port ${result.port}: ${JSON.stringify(result.device)}`)
+		this.deviceSpec = result.device
+		return result.device
+	}
+
+	get powerOffInProgress(): boolean {
+		return Date.now() < this.#powerOffUntil
+	}
+
+	/** Treat the TV as off for a while after KEY_POWER, so a second Power Off can't toggle it back on. */
+	markPoweringOff(): void {
+		const reportsPowerState = typeof this.deviceSpec?.PowerState === 'string'
+		this.#powerOffUntil = Date.now() + (reportsPowerState ? POWER_OFF_GRACE_MS : POWER_OFF_GRACE_NO_POWERSTATE_MS)
+		this.setPowerState('standby')
+	}
+
+	clearPoweringOff(): void {
+		this.#powerOffUntil = 0
+	}
+
+	async readPowerState(verbose: boolean): Promise<PowerState> {
+		if (this.powerOffInProgress) {
+			if (verbose) this.log('debug', 'Power off was sent moments ago; treating the TV as in standby')
+			return 'standby'
+		}
+		const spec = await this.readDeviceSpec(verbose)
+		if (!spec) return 'off'
+		if (typeof spec.PowerState === 'string') return spec.PowerState.trim().toLowerCase() === 'on' ? 'on' : 'standby'
+
+		// TVs from before about 2018 don't report PowerState. Like Home Assistant, fall back to whether the remote
+		// connection works; skip that while unpaired so polling doesn't keep raising the pairing prompt.
+		if (!this.tv || !this.secrets.token) return 'on'
 		try {
-			const res = await fetch(url, { signal: controller.signal })
-			if (!res.ok) {
-				this.log('debug', `Device API ${url} returned HTTP ${res.status} — falling back to basic control`)
-				return null
-			}
-			const body = await res.text()
-			let data: { device?: { PowerState?: string } }
-			try {
-				data = JSON.parse(body) as { device?: { PowerState?: string } }
-			} catch {
-				this.log('debug', `Device API responded but body was not valid — falling back to basic control`)
-				return null
-			}
-			const raw = data.device?.PowerState
-			if (typeof raw !== 'string') {
-				this.log('debug', `Device API responded but had no device.PowerState field — falling back to basic control.`)
-				return null
-			}
-			const normalized: DevicePowerState = raw.trim().toLowerCase() === 'on' ? 'on' : 'standby'
-			this.log('debug', `Device API reports PowerState="${raw}" (normalized: ${normalized})`)
-			return normalized
-		} catch (err: unknown) {
-			const reason =
-				err instanceof Error && err.name === 'AbortError'
-					? `no response within ${POWER_STATE_FETCH_TIMEOUT_MS}ms (endpoint absent, blocked, or TV powered off)`
-					: err instanceof Error
-						? err.message
-						: String(err)
-			this.log('debug', `Could not reach device power API at ${url}: ${reason} — falling back to blind control`)
-			return null
-		} finally {
-			clearTimeout(timeout)
+			await this.tv.connect()
+			return 'on'
+		} catch {
+			return 'standby'
 		}
 	}
 
 	/**
-	 * samsung-tv-remote (>= 3.0.6) loads its cached pairing token asynchronously after construction, and
-	 * its WebSocket URL is undefined until then, so a key sent right after `new SamsungTvRemote()` fails
-	 * with "Invalid URL: undefined". Retry briefly while that load completes.
+	 * Sends Wake-on-LAN, then waits for the TV's device API to answer. Avoids shelling out to `ping`, whose
+	 * flags differ between platforms and which isn't always on Companion's PATH.
 	 */
-	private async sendKeyWhenRemoteReady(tv: SamsungTvRemote, key: keyof typeof Keys): Promise<void> {
-		for (let attempt = 1; ; attempt++) {
-			try {
-				await tv.sendKey(key)
-				return
-			} catch (err: unknown) {
-				const notReady = err instanceof Error && err.message === 'Invalid URL: undefined'
-				if (!notReady || attempt >= REMOTE_READY_MAX_ATTEMPTS) throw err
-				this.log('debug', `Remote not ready yet (pairing token still loading), retrying key ${key}`)
-				await new Promise((resolve) => setTimeout(resolve, REMOTE_READY_RETRY_DELAY_MS))
-			}
+	async wakeTv(): Promise<boolean> {
+		if (!this.config.macAddress) throw new Error('No MAC address configured, so Wake-on-LAN cannot be sent')
+		await sendWakeOnLan(this.config.macAddress)
+		const deadline = Date.now() + WAKE_TIMEOUT_MS
+		while (Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, WAKE_POLL_INTERVAL_MS))
+			if ((await this.readDeviceSpec(false)) !== null) return true
+		}
+		return false
+	}
+
+	setPowerState(state: PowerState): void {
+		if (state === this.powerState && state !== 'unknown') return
+		const turnedOn = state === 'on' && this.powerState !== 'on'
+		this.powerState = state
+		this.setVariableValues({ power_state: state })
+		this.checkFeedbacks('powerOn')
+
+		// The start-up connection fails if the TV was off, so (re)connect when it comes on. This is also when a
+		// first-time pairing prompt can actually be shown.
+		if (turnedOn && this.tv && !this.tv.isConnected) {
+			this.log('debug', 'TV turned on; connecting to it')
+			this.connectRemote(this.tv)
 		}
 	}
 
-	async sendKey(key: keyof typeof Keys): Promise<void> {
+	startPowerPolling(): void {
+		this.stopPowerPolling()
+		if (!this.config.host) return
+		const generation = this.#powerPollGeneration
+		const poll = async (): Promise<void> => {
+			const state = await this.readPowerState(false)
+			// Ignore results from a poll loop that was stopped (config change, destroy) while it was in flight
+			if (generation !== this.#powerPollGeneration) return
+			this.setPowerState(state)
+			this.#powerPollTimer = setTimeout(() => void poll(), POWER_POLL_INTERVAL_MS)
+		}
+		void poll()
+	}
+
+	stopPowerPolling(): void {
+		this.#powerPollGeneration++
+		clearTimeout(this.#powerPollTimer)
+		this.#powerPollTimer = undefined
+	}
+
+	/**
+	 * Sends a key, or holds it for `holdMs` when that isn't null. Returns whether it was sent; failures are logged
+	 * and reflected in the connection status.
+	 */
+	async sendKey(key: SamsungKey, holdMs: number | null): Promise<boolean> {
 		if (!key || !(key in Keys)) {
 			this.log('error', `Cannot send key — invalid or missing key: ${String(key)}`)
-			return
+			return false
 		}
 		if (!this.tv) {
 			this.log('error', 'Cannot send key — no TV connection configured')
-			return
+			return false
 		}
-		this.log('debug', `Sending key ${key} to ${this.config.host}:${this.config.port ?? 8002} via WebSocket`)
+		const how = holdMs === null ? '' : ` (held ${holdMs}ms)`
+		this.log('debug', `Sending key ${key}${how} to ${this.config.host}:${this.remotePort} via WebSocket`)
 		try {
-			await this.sendKeyWhenRemoteReady(this.tv, key)
+			if (holdMs === null) await this.tv.sendKey(key)
+			else await this.tv.holdKey(key, holdMs)
 			this.log('debug', `Key ${key} sent successfully`)
 			this.updateStatus(InstanceStatus.Ok)
+			return true
 		} catch (err: unknown) {
 			const message = err instanceof Error ? err.message : String(err)
 			this.log(
@@ -177,26 +299,47 @@ export default class ModuleInstance extends InstanceBase<SamsungTypes> {
 					`the pairing may not be authorized on the TV, or the connection port may be wrong.`,
 			)
 			this.updateStatus(InstanceStatus.ConnectionFailure, message)
+			return false
 		}
 	}
 
+	/** Turns the TV off; Frame TVs need KEY_POWER held, or a click just toggles Art Mode. */
+	async sendPowerOff(): Promise<void> {
+		const isFrame = this.deviceSpec?.FrameTVSupport === 'true'
+		const sent = await this.sendKey('KEY_POWER', isFrame ? FRAME_POWER_HOLD_MS : null)
+		if (sent) this.markPoweringOff()
+	}
+
 	async destroy(): Promise<void> {
+		this.stopPowerPolling()
 		if (this.tv) {
 			this.tv.disconnect()
 			this.tv = undefined
 		}
 	}
 
-	async configUpdated(config: SamsungConfig): Promise<void> {
+	async configUpdated(config: SamsungConfig, secrets: SamsungSecrets): Promise<void> {
+		secrets ??= {}
 		const needsReconnect =
 			config.host !== this.config.host ||
 			config.port !== this.config.port ||
-			config.macAddress !== this.config.macAddress
+			config.limitTls !== this.config.limitTls ||
+			secrets.token !== this.secrets.token
+
+		const hostChanged = config.host !== this.config.host
 
 		this.config = config
+		this.secrets = secrets
 
+		if (!this.config.macAddress) await this.fillMacAddressFromDiscovery()
 		if (needsReconnect) {
 			this.establishConnection()
+		}
+		if (hostChanged) {
+			this.deviceSpec = undefined
+			this.clearPoweringOff()
+			this.setPowerState('unknown')
+			this.startPowerPolling()
 		}
 	}
 
@@ -208,7 +351,15 @@ export default class ModuleInstance extends InstanceBase<SamsungTypes> {
 		updateActions(this)
 	}
 
+	updateFeedbacks(): void {
+		updateFeedbacks(this)
+	}
+
 	updateVariableDefinitions(): void {
 		updateVariableDefinitions(this)
+	}
+
+	updatePresets(): void {
+		updatePresets(this)
 	}
 }
