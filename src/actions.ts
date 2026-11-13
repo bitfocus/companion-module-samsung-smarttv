@@ -1,5 +1,11 @@
+import type { CompanionActionSchemaWithoutResult } from '@companion-module/base'
 import { Keys } from 'samsung-tv-remote'
-import type { ModuleInstance } from './index.js'
+import type ModuleInstance from './index.js'
+
+export type SamsungActions = {
+	power: CompanionActionSchemaWithoutResult<{ power: 'powerOn' | 'powerOff' }>
+	sendButton: CompanionActionSchemaWithoutResult<{ remoteButton: keyof typeof Keys }>
+}
 
 const KEY_CHOICES = Object.keys(Keys).map((key) => ({ label: key, id: key }))
 
@@ -23,6 +29,10 @@ export function updateActions(self: ModuleInstance): void {
 			],
 			callback: async (event) => {
 				const powerState = await self.fetchDevicePowerState()
+				self.log(
+					'debug',
+					`Power action requested: ${event.options.power}; detected power state: ${powerState ?? 'unknown'}`,
+				)
 
 				if (event.options.power === 'powerOn') {
 					if (powerState === 'on') {
@@ -47,7 +57,11 @@ export function updateActions(self: ModuleInstance): void {
 						await self.tv.wakeTV()
 					} catch (err: unknown) {
 						const message = err instanceof Error ? err.message : String(err)
-						self.log('error', 'Wake-on-LAN failed: ' + message)
+						self.log(
+							'error',
+							`Wake-on-LAN failed: ${message}. The TV did not respond to a ping after the magic packet was sent. ` +
+								`Confirm MAC ${self.config.macAddress} is correct and the TV is on wired Ethernet.`,
+						)
 						return
 					}
 					self.log('debug', 'Waiting for TV to boot...')
@@ -55,11 +69,8 @@ export function updateActions(self: ModuleInstance): void {
 					self.log('debug', 'Re-establishing WebSocket connection...')
 					self.establishConnection()
 				} else {
-					if (powerState !== 'on') {
-						self.log(
-							'debug',
-							'Power off skipped: device API does not report PowerState on (already standby/off or unreachable)',
-						)
+					if (powerState === 'standby') {
+						self.log('debug', 'Power off skipped: device API reports PowerState is already standby')
 						return
 					}
 					self.log('debug', 'Power off: sending KEY_POWER')
@@ -79,8 +90,7 @@ export function updateActions(self: ModuleInstance): void {
 				},
 			],
 			callback: async (event) => {
-				const remoteButton = event.options.remoteButton
-				await self.sendKey(remoteButton as keyof typeof Keys)
+				await self.sendKey(event.options.remoteButton)
 			},
 		},
 	})

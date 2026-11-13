@@ -1,13 +1,24 @@
-import { InstanceBase, InstanceStatus, runEntrypoint, SomeCompanionConfigField } from '@companion-module/base'
+import { InstanceBase, InstanceStatus, type InstanceTypes, type SomeCompanionConfigField } from '@companion-module/base'
 import { SamsungTvRemote, Keys, getAwakeSamsungDevices, type SamsungDevice } from 'samsung-tv-remote'
-import { updateActions } from './actions.js'
+import { updateActions, type SamsungActions } from './actions.js'
 import { updateVariableDefinitions } from './variables.js'
-import { defineConfigFields, SamsungConfig } from './config.js'
+import { defineConfigFields, type SamsungConfig } from './config.js'
+
+export interface SamsungTypes extends InstanceTypes {
+	config: SamsungConfig
+	secrets: undefined
+	actions: SamsungActions
+	variables: Record<string, never>
+}
+
+export const UpgradeScripts = []
 
 /** Port for Samsung REST device info (`/api/v2`), not the WebSocket remote port. */
 const DEVICE_REST_PORT = 8001
 const DEVICE_API_PATH = '/api/v2/'
-const POWER_STATE_FETCH_TIMEOUT_MS = 5000
+const POWER_STATE_FETCH_TIMEOUT_MS = 2000
+const REMOTE_READY_RETRY_DELAY_MS = 50
+const REMOTE_READY_MAX_ATTEMPTS = 10
 
 /** Normalized from `device.PowerState` on `http://<ip>:8001/api/v2`. */
 export type DevicePowerState = 'on' | 'standby'
@@ -17,7 +28,7 @@ function formatDiscoveredSamsungDevice(device: SamsungDevice): string {
 	return `${friendlyName} (IP: ${device.ip}, MAC: ${device.mac})`
 }
 
-export class ModuleInstance extends InstanceBase<SamsungConfig> {
+export default class ModuleInstance extends InstanceBase<SamsungTypes> {
 	tv: SamsungTvRemote | undefined
 	config!: SamsungConfig
 
@@ -63,7 +74,10 @@ export class ModuleInstance extends InstanceBase<SamsungConfig> {
 			return
 		}
 
-		this.log('debug', 'Creating remote for TV at ' + this.config.host)
+		this.log(
+			'debug',
+			`Creating remote for TV — IP: ${this.config.host}, port: ${this.config.port ?? 8002}, MAC: ${this.config.macAddress}`,
+		)
 		this.tv = new SamsungTvRemote({
 			ip: this.config.host,
 			mac: this.config.macAddress,
@@ -85,25 +99,59 @@ export class ModuleInstance extends InstanceBase<SamsungConfig> {
 		const url = `http://${this.config.host}:${DEVICE_REST_PORT}${DEVICE_API_PATH}`
 		const controller = new AbortController()
 		const timeout = setTimeout(() => controller.abort(), POWER_STATE_FETCH_TIMEOUT_MS)
+		this.log('debug', `Querying device power API: ${url} (timeout ${POWER_STATE_FETCH_TIMEOUT_MS}ms)`)
 		try {
 			const res = await fetch(url, { signal: controller.signal })
 			if (!res.ok) {
-				this.log('debug', `Device API ${url} returned HTTP ${res.status}`)
+				this.log('debug', `Device API ${url} returned HTTP ${res.status} — falling back to basic control`)
 				return null
 			}
-			const data = (await res.json()) as { device?: { PowerState?: string } }
+			const body = await res.text()
+			let data: { device?: { PowerState?: string } }
+			try {
+				data = JSON.parse(body) as { device?: { PowerState?: string } }
+			} catch {
+				this.log('debug', `Device API responded but body was not valid — falling back to basic control`)
+				return null
+			}
 			const raw = data.device?.PowerState
 			if (typeof raw !== 'string') {
-				this.log('debug', 'Device API response had no PowerState')
+				this.log('debug', `Device API responded but had no device.PowerState field — falling back to basic control.`)
 				return null
 			}
-			return raw.trim().toLowerCase() === 'on' ? 'on' : 'standby'
+			const normalized: DevicePowerState = raw.trim().toLowerCase() === 'on' ? 'on' : 'standby'
+			this.log('debug', `Device API reports PowerState="${raw}" (normalized: ${normalized})`)
+			return normalized
 		} catch (err: unknown) {
-			const message = err instanceof Error ? err.message : String(err)
-			this.log('debug', `Could not read device power state from ${url}: ${message}`)
+			const reason =
+				err instanceof Error && err.name === 'AbortError'
+					? `no response within ${POWER_STATE_FETCH_TIMEOUT_MS}ms (endpoint absent, blocked, or TV powered off)`
+					: err instanceof Error
+						? err.message
+						: String(err)
+			this.log('debug', `Could not reach device power API at ${url}: ${reason} — falling back to blind control`)
 			return null
 		} finally {
 			clearTimeout(timeout)
+		}
+	}
+
+	/**
+	 * samsung-tv-remote (>= 3.0.6) loads its cached pairing token asynchronously after construction, and
+	 * its WebSocket URL is undefined until then, so a key sent right after `new SamsungTvRemote()` fails
+	 * with "Invalid URL: undefined". Retry briefly while that load completes.
+	 */
+	private async sendKeyWhenRemoteReady(tv: SamsungTvRemote, key: keyof typeof Keys): Promise<void> {
+		for (let attempt = 1; ; attempt++) {
+			try {
+				await tv.sendKey(key)
+				return
+			} catch (err: unknown) {
+				const notReady = err instanceof Error && err.message === 'Invalid URL: undefined'
+				if (!notReady || attempt >= REMOTE_READY_MAX_ATTEMPTS) throw err
+				this.log('debug', `Remote not ready yet (pairing token still loading), retrying key ${key}`)
+				await new Promise((resolve) => setTimeout(resolve, REMOTE_READY_RETRY_DELAY_MS))
+			}
 		}
 	}
 
@@ -116,13 +164,18 @@ export class ModuleInstance extends InstanceBase<SamsungConfig> {
 			this.log('error', 'Cannot send key — no TV connection configured')
 			return
 		}
-		this.log('debug', `Sending key: ${key}`)
+		this.log('debug', `Sending key ${key} to ${this.config.host}:${this.config.port ?? 8002} via WebSocket`)
 		try {
-			await this.tv.sendKey(key)
+			await this.sendKeyWhenRemoteReady(this.tv, key)
+			this.log('debug', `Key ${key} sent successfully`)
 			this.updateStatus(InstanceStatus.Ok)
 		} catch (err: unknown) {
 			const message = err instanceof Error ? err.message : String(err)
-			this.log('error', `Failed to send key ${key}: ${message}`)
+			this.log(
+				'error',
+				`Failed to send key ${key}: ${message}. If this was a power command, the TV may be off/unreachable, ` +
+					`the pairing may not be authorized on the TV, or the connection port may be wrong.`,
+			)
 			this.updateStatus(InstanceStatus.ConnectionFailure, message)
 		}
 	}
@@ -159,5 +212,3 @@ export class ModuleInstance extends InstanceBase<SamsungConfig> {
 		updateVariableDefinitions(this)
 	}
 }
-
-runEntrypoint(ModuleInstance, [])

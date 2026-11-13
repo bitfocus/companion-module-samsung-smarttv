@@ -1,6 +1,6 @@
 import { Regex, SomeCompanionConfigField } from '@companion-module/base'
 
-export interface SamsungConfig {
+export type SamsungConfig = {
 	host: string
 	macAddress: string
 	port: number
