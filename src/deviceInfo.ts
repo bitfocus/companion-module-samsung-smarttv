@@ -22,24 +22,41 @@ async function requestDeviceInfo(
 	timeoutMs: number,
 ): Promise<SamsungDeviceSpec> {
 	return new Promise((resolve, reject) => {
+		let settled = false
+		const finish = (err: Error | null, device?: SamsungDeviceSpec): void => {
+			if (settled) return
+			settled = true
+			if (err) reject(err)
+			else if (device) resolve(device)
+			else reject(new Error('response has no device section'))
+		}
+
 		const options = { host, port, path: '/api/v2/', timeout: timeoutMs }
 		const onResponse = (res: http.IncomingMessage): void => {
 			if (res.statusCode !== 200) {
 				res.resume()
-				reject(new Error(`HTTP ${res.statusCode}`))
+				finish(new Error(`HTTP ${res.statusCode}`))
 				return
 			}
 			let body = ''
+			let completed = false
 			res.setEncoding('utf8')
 			res.on('data', (chunk: string) => (body += chunk))
 			res.on('end', () => {
+				completed = true
 				try {
 					const data = JSON.parse(body) as { device?: SamsungDeviceSpec }
 					if (!data.device || typeof data.device !== 'object') throw new Error('response has no device section')
-					resolve(data.device)
+					finish(null, data.device)
 				} catch (err) {
-					reject(err instanceof Error ? err : new Error(String(err)))
+					finish(err instanceof Error ? err : new Error(String(err)))
 				}
+			})
+			// 'end' is skipped when the socket dies mid-body. Without this the promise never settles, and power
+			// polling waits for it before scheduling the next check.
+			res.on('error', (err: Error) => finish(err))
+			res.on('close', () => {
+				if (!completed && !res.complete) finish(new Error('response closed before completion'))
 			})
 		}
 		// Port 8002 is the TLS port, with a self-signed certificate
@@ -50,8 +67,13 @@ async function requestDeviceInfo(
 						{ ...options, rejectUnauthorized: false, ...(limitTlsTo12 ? { maxVersion: 'TLSv1.2' as const } : {}) },
 						onResponse,
 					)
-		req.on('timeout', () => req.destroy(new Error(`no response within ${timeoutMs}ms`)))
-		req.on('error', reject)
+		req.on('timeout', () => {
+			const err = new Error(`no response within ${timeoutMs}ms`)
+			req.destroy(err)
+			// destroy() does not always emit 'error' once a response has started
+			finish(err)
+		})
+		req.on('error', (err: Error) => finish(err))
 	})
 }
 

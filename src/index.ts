@@ -211,11 +211,19 @@ export default class ModuleInstance extends InstanceBase<SamsungTypes> {
 
 		// TVs from before about 2018 don't report PowerState. Like Home Assistant, fall back to whether the remote
 		// connection works; skip that while unpaired so polling doesn't keep raising the pairing prompt.
+		// This connect() does not go through connectRemote, and setPowerState will not connect again once the
+		// socket is already open, so the status has to be published here or a TV that was off at startup stays
+		// "Disconnected" after it comes on.
 		if (!this.tv || !this.secrets.token) return 'on'
+		const tv = this.tv
 		try {
-			await this.tv.connect()
+			await tv.connect()
+			// A config change may have replaced the remote while this connect was in flight
+			if (this.tv !== tv) return this.powerState
+			this.updateStatus(InstanceStatus.Ok)
 			return 'on'
 		} catch {
+			if (this.tv !== tv) return this.powerState
 			return 'standby'
 		}
 	}
@@ -255,10 +263,17 @@ export default class ModuleInstance extends InstanceBase<SamsungTypes> {
 		if (!this.config.host) return
 		const generation = this.#powerPollGeneration
 		const poll = async (): Promise<void> => {
-			const state = await this.readPowerState(false)
-			// Ignore results from a poll loop that was stopped (config change, destroy) while it was in flight
+			try {
+				const state = await this.readPowerState(false)
+				// Ignore results from a poll loop that was stopped (config change, destroy) while it was in flight
+				if (generation !== this.#powerPollGeneration) return
+				this.setPowerState(state)
+			} catch (err: unknown) {
+				if (generation !== this.#powerPollGeneration) return
+				const message = err instanceof Error ? err.message : String(err)
+				this.log('debug', `Could not read power state: ${message}`)
+			}
 			if (generation !== this.#powerPollGeneration) return
-			this.setPowerState(state)
 			this.#powerPollTimer = setTimeout(() => void poll(), POWER_POLL_INTERVAL_MS)
 		}
 		void poll()

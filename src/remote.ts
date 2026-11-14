@@ -41,6 +41,8 @@ export class SamsungRemote {
 	#queue: Promise<void> = Promise.resolve()
 	#readyAt = 0
 	#heartbeatTimer: NodeJS.Timeout | undefined
+	/** Set by disconnect(). A queued command must not open a socket on a remote that has been replaced. */
+	#disposed = false
 
 	constructor(options: SamsungRemoteOptions) {
 		this.#options = options
@@ -48,7 +50,7 @@ export class SamsungRemote {
 	}
 
 	get isConnected(): boolean {
-		return this.#socket?.readyState === WebSocket.OPEN
+		return !this.#disposed && this.#socket?.readyState === WebSocket.OPEN
 	}
 
 	async connect(): Promise<void> {
@@ -122,6 +124,7 @@ export class SamsungRemote {
 	}
 
 	disconnect(): void {
+		this.#disposed = true
 		clearTimeout(this.#heartbeatTimer)
 		for (const socket of [this.#socket, this.#pendingSocket]) {
 			if (!socket) continue
@@ -134,6 +137,7 @@ export class SamsungRemote {
 	}
 
 	async #getSocket(): Promise<WebSocket> {
+		if (this.#disposed) throw new Error('Remote connection was closed')
 		if (this.#socket?.readyState === WebSocket.OPEN) return this.#socket
 		this.#connecting ??= this.#openSocket().finally(() => {
 			this.#connecting = null
@@ -195,6 +199,11 @@ export class SamsungRemote {
 				switch (message.event) {
 					case 'ms.channel.connect': {
 						if (settled) return
+						// disconnect() may have run while this message was queued; don't adopt the socket
+						if (this.#disposed) {
+							fail(new Error('Remote connection was closed'))
+							return
+						}
 						settled = true
 						clearTimeout(timer)
 						this.#pendingSocket = null
@@ -220,7 +229,7 @@ export class SamsungRemote {
 			})
 
 			socket.on('ping', () => {
-				if (this.#socket === socket) this.#armHeartbeat(socket)
+				if (!this.#disposed && this.#socket === socket) this.#armHeartbeat(socket)
 			})
 
 			socket.on('error', (err: NodeJS.ErrnoException) => {
